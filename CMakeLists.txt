@@ -21,7 +21,7 @@ add_library(iris_common STATIC
     src/common/socket.cpp
     src/common/protocol.cpp
 )
-target_include_directories(iris_common PUBLIC include)
+target_include_directories(iris_common PUBLIC include include/common)
 
 # Server
 add_executable(iris_server
