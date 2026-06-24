@@ -33,8 +33,8 @@ namespace iris::network
         std::optional<size_t> receive(void *buffer, size_t length); // 0 == peer closed
         bool receive_all(void *buffer, size_t length);
 
-        // Unblocks a thread parked in receive() on this socket.
-        void shutdown();
+        // Raw file descriptor, for multiplexing with poll()/select().
+        int native_handle() const;
 
         const char *peer_ip() const;
         uint16_t peer_port() const;

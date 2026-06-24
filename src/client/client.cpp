@@ -1,16 +1,45 @@
 #include "client.h"
 
+#include <poll.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <fstream>
-#include <iostream>
 #include <limits>
-#include <thread>
 #include <vector>
 
 #include "log.h"
 #include "protocol.h"
 
 namespace fs = std::filesystem;
+
+namespace
+{
+    // Reads one server -> client chat line frame: [u16 length][text].
+    std::optional<std::string> receive_chat_line(iris::network::Socket *sock)
+    {
+        std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
+        if (!sock->receive_all(lengthBuf, sizeof(lengthBuf)))
+        {
+            return std::nullopt;
+        }
+
+        auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
+        if (!length)
+        {
+            return std::nullopt;
+        }
+
+        std::string line(*length, '\0');
+        if (*length > 0 && !sock->receive_all(line.data(), *length))
+        {
+            return std::nullopt;
+        }
+
+        return line;
+    }
+} // namespace
 
 std::string Client::resolve_output_path(const char *filename)
 {
@@ -163,62 +192,89 @@ std::optional<ClientError> Client::chat(const std::string &nick, const std::stri
         return ClientError::SendFailed;
     }
 
-    iris::network::Socket *sock = this->socket.get();
-
-    // Reader thread: prints chat lines pushed by the server until the socket closes.
-    std::thread reader([sock]()
-                       {
-        while (true)
-        {
-            std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
-            if (!sock->receive_all(lengthBuf, sizeof(lengthBuf)))
-            {
-                break;
-            }
-
-            auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
-            if (!length)
-            {
-                break;
-            }
-
-            std::string line(*length, '\0');
-            if (*length > 0 && !sock->receive_all(line.data(), *length))
-            {
-                break;
-            }
-
-            PRINT(line);
-        } });
-
     PRINT("Conectado à sala \"" << room << "\" como \"" << nick << "\". Digite mensagens (/sair para encerrar).");
 
-    std::string line;
-    while (std::getline(std::cin, line))
+    iris::network::Socket *sock = this->socket.get();
+
+    // Single loop multiplexing stdin and the socket with poll(), so a server
+    // disconnect is noticed immediately instead of only after the next Enter.
+    struct pollfd fds[2] = {};
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN;
+    fds[1].fd = sock->native_handle();
+    fds[1].events = POLLIN;
+
+    std::string stdinBuffer;
+    bool running = true;
+
+    while (running)
     {
-        if (line == "/sair")
+        if (::poll(fds, 2, -1) < 0)
         {
+            if (errno == EINTR)
+            {
+                continue;
+            }
             break;
         }
-        if (line.empty())
+
+        // Incoming chat lines (or a closed connection) from the server.
+        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
         {
-            continue;
+            auto line = receive_chat_line(sock);
+            if (!line)
+            {
+                PRINT_ERR("Conexão com o servidor encerrada.");
+                break;
+            }
+            PRINT(*line);
         }
 
-        if (line.size() > std::numeric_limits<uint16_t>::max())
+        // Keyboard input. Assemble whole lines so poll() stays correct even when
+        // several arrive in one read.
+        if (fds[0].revents & (POLLIN | POLLHUP))
         {
-            line.resize(std::numeric_limits<uint16_t>::max());
-        }
+            char buffer[4096];
+            ssize_t got = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (got <= 0)
+            {
+                break; // stdin closed (EOF / Ctrl-D)
+            }
+            stdinBuffer.append(buffer, static_cast<size_t>(got));
 
-        auto message = iris::protocol::serialize_chat_message(line);
-        if (!this->socket->send_all(message.data(), message.size()))
-        {
-            break;
+            size_t newline;
+            while (running && (newline = stdinBuffer.find('\n')) != std::string::npos)
+            {
+                std::string message = stdinBuffer.substr(0, newline);
+                stdinBuffer.erase(0, newline + 1);
+                if (!message.empty() && message.back() == '\r')
+                {
+                    message.pop_back();
+                }
+
+                if (message == "/sair")
+                {
+                    running = false;
+                    break;
+                }
+                if (message.empty())
+                {
+                    continue;
+                }
+                if (message.size() > std::numeric_limits<uint16_t>::max())
+                {
+                    message.resize(std::numeric_limits<uint16_t>::max());
+                }
+
+                auto frame = iris::protocol::serialize_chat_message(message);
+                if (!this->socket->send_all(frame.data(), frame.size()))
+                {
+                    running = false;
+                    break;
+                }
+            }
         }
     }
-
-    this->socket->shutdown(); // unblock the reader thread, then wait for it
-    reader.join();
 
     return std::nullopt;
 }

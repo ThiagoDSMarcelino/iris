@@ -44,8 +44,10 @@ Server -> client:
 
 A file download is a one-shot request/response (the connection closes afterwards).
 A chat connection is **persistent**: after `ChatJoin` the client streams `ChatMessage`
-frames and the server pushes `Chat line` frames (peer messages and join/leave notices)
-to every member of the same room until the client disconnects.
+frames; the server relays each one to the **other** members of the room (the sender
+already sees what they typed) and pushes join/leave notices to the room. The client
+multiplexes the keyboard and the socket with `poll()`, so it also reports and exits
+right away if the server connection drops — no stray `Enter` needed.
 
 All multi-byte integers are sent in big-endian (network) order.
 
