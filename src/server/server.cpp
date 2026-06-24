@@ -1,6 +1,8 @@
 #include "server.h"
 
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,14 +97,46 @@ void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
     std::string peer = std::string(conn->peer_ip()) + ":" + std::to_string(conn->peer_port());
     LOG("New connection from " << peer);
 
-    std::byte header[iris::protocol::REQUEST_HEADER_SIZE];
-    if (!conn->receive_all(header, sizeof(header)))
+    std::byte opcodeBuf[iris::protocol::OPCODE_SIZE];
+    if (!conn->receive_all(opcodeBuf, sizeof(opcodeBuf)))
+    {
+        LOG_ERR("Failed to read opcode from " << peer);
+        return;
+    }
+
+    auto opcode = iris::protocol::parse_opcode(opcodeBuf, sizeof(opcodeBuf));
+    if (!opcode)
+    {
+        LOG_ERR("Invalid opcode from " << peer);
+        return;
+    }
+
+    switch (*opcode)
+    {
+    case iris::protocol::MessageType::FileRequest:
+        this->handle_file_request(conn.get(), peer);
+        break;
+
+    case iris::protocol::MessageType::ChatJoin:
+        this->handle_chat(std::move(conn), peer);
+        break;
+
+    default:
+        LOG_ERR("Unsupported opcode from " << peer);
+        break;
+    }
+}
+
+void Server::handle_file_request(iris::network::Socket *conn, const std::string &peer)
+{
+    std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
+    if (!conn->receive_all(lengthBuf, sizeof(lengthBuf)))
     {
         LOG_ERR("Failed to read request header from " << peer);
         return;
     }
 
-    auto nameLength = iris::protocol::parse_request_header(header, sizeof(header));
+    auto nameLength = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
     if (!nameLength || *nameLength == 0)
     {
         LOG_ERR("Invalid request from " << peer);
@@ -121,7 +155,7 @@ void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec))
     {
-        send_status(conn.get(), iris::protocol::Status::NOT_FOUND, "File not found");
+        send_status(conn, iris::protocol::Status::NOT_FOUND, "File not found");
         LOG("File not found: " << filename);
         return;
     }
@@ -129,7 +163,7 @@ void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
     uint64_t fileSize = std::filesystem::file_size(path, ec);
     if (ec)
     {
-        send_status(conn.get(), iris::protocol::Status::ERROR, "Failed to stat file");
+        send_status(conn, iris::protocol::Status::ERROR, "Failed to stat file");
         LOG_ERR("Failed to stat file: " << filename);
         return;
     }
@@ -137,7 +171,7 @@ void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
     std::ifstream file(path, std::ios::binary);
     if (!file)
     {
-        send_status(conn.get(), iris::protocol::Status::ERROR, "Failed to open file");
+        send_status(conn, iris::protocol::Status::ERROR, "Failed to open file");
         LOG_ERR("Failed to open file: " << filename);
         return;
     }
@@ -170,4 +204,71 @@ void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
     }
 
     LOG("Sent \"" << filename << "\" (" << sent << " bytes) to " << peer);
+}
+
+static std::optional<std::string> read_length_prefixed(iris::network::Socket *conn)
+{
+    std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
+    if (!conn->receive_all(lengthBuf, sizeof(lengthBuf)))
+    {
+        return std::nullopt;
+    }
+
+    auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
+    if (!length)
+    {
+        return std::nullopt;
+    }
+
+    std::string value(*length, '\0');
+    if (*length > 0 && !conn->receive_all(value.data(), *length))
+    {
+        return std::nullopt;
+    }
+
+    return value;
+}
+
+void Server::handle_chat(std::shared_ptr<iris::network::Socket> conn, const std::string &peer)
+{
+    auto nick = read_length_prefixed(conn.get());
+    auto room = read_length_prefixed(conn.get());
+    if (!nick || !room || nick->empty() || room->empty())
+    {
+        LOG_ERR("Invalid chat join from " << peer);
+        return;
+    }
+
+    auto client = std::make_shared<iris::chat::ChatClient>();
+    client->socket = conn;
+    client->nick = *nick;
+
+    this->chatHub.join(*room, client);
+    LOG(*nick << " (" << peer << ") joined room \"" << *room << "\"");
+
+    while (true)
+    {
+        std::byte opcodeBuf[iris::protocol::OPCODE_SIZE];
+        if (!conn->receive_all(opcodeBuf, sizeof(opcodeBuf)))
+        {
+            break; // peer disconnected
+        }
+
+        auto opcode = iris::protocol::parse_opcode(opcodeBuf, sizeof(opcodeBuf));
+        if (!opcode || *opcode != iris::protocol::MessageType::ChatMessage)
+        {
+            break;
+        }
+
+        auto text = read_length_prefixed(conn.get());
+        if (!text)
+        {
+            break;
+        }
+
+        this->chatHub.broadcast(*room, client, *text);
+    }
+
+    this->chatHub.leave(*room, client);
+    LOG(*nick << " (" << peer << ") left room \"" << *room << "\"");
 }

@@ -143,6 +143,14 @@ bool Socket::receive_all(void *buffer, size_t length)
     return true;
 }
 
+void Socket::shutdown()
+{
+    if (this->fileDescriptor >= 0)
+    {
+        ::shutdown(this->fileDescriptor, SHUT_RDWR);
+    }
+}
+
 const char *Socket::peer_ip() const
 {
     return this->peerIp;

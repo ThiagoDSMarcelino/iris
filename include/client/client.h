@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "socket.h"
 
@@ -27,6 +28,7 @@ public:
     static std::expected<std::unique_ptr<Client>, ClientError> create(const char *ip, uint16_t port, const char *outputDir = nullptr);
 
     std::optional<ClientError> fetch(const char *filename);
+    std::optional<ClientError> chat(const std::string &nick, const std::string &room);
 
 private:
     Client() = default;

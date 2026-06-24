@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iostream>
+#include <limits>
+#include <thread>
 #include <vector>
 
 #include "log.h"
@@ -76,7 +79,7 @@ std::optional<ClientError> Client::fetch(const char *filename)
         return ClientError::ConnectFailed;
     }
 
-    auto request = iris::protocol::serialize_request(filename);
+    auto request = iris::protocol::serialize_file_request(filename);
     if (!this->socket->send_all(request.data(), request.size()))
     {
         return ClientError::SendFailed;
@@ -144,5 +147,78 @@ std::optional<ClientError> Client::fetch(const char *filename)
     }
 
     PRINT("File \"" << filename << "\" received successfully (" << received << " bytes)");
+    return std::nullopt;
+}
+
+std::optional<ClientError> Client::chat(const std::string &nick, const std::string &room)
+{
+    if (!this->socket->connect(this->ip, this->port))
+    {
+        return ClientError::ConnectFailed;
+    }
+
+    auto join = iris::protocol::serialize_chat_join(nick, room);
+    if (!this->socket->send_all(join.data(), join.size()))
+    {
+        return ClientError::SendFailed;
+    }
+
+    iris::network::Socket *sock = this->socket.get();
+
+    // Reader thread: prints chat lines pushed by the server until the socket closes.
+    std::thread reader([sock]()
+                       {
+        while (true)
+        {
+            std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
+            if (!sock->receive_all(lengthBuf, sizeof(lengthBuf)))
+            {
+                break;
+            }
+
+            auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
+            if (!length)
+            {
+                break;
+            }
+
+            std::string line(*length, '\0');
+            if (*length > 0 && !sock->receive_all(line.data(), *length))
+            {
+                break;
+            }
+
+            PRINT(line);
+        } });
+
+    PRINT("Conectado à sala \"" << room << "\" como \"" << nick << "\". Digite mensagens (/sair para encerrar).");
+
+    std::string line;
+    while (std::getline(std::cin, line))
+    {
+        if (line == "/sair")
+        {
+            break;
+        }
+        if (line.empty())
+        {
+            continue;
+        }
+
+        if (line.size() > std::numeric_limits<uint16_t>::max())
+        {
+            line.resize(std::numeric_limits<uint16_t>::max());
+        }
+
+        auto message = iris::protocol::serialize_chat_message(line);
+        if (!this->socket->send_all(message.data(), message.size()))
+        {
+            break;
+        }
+    }
+
+    this->socket->shutdown(); // unblock the reader thread, then wait for it
+    reader.join();
+
     return std::nullopt;
 }

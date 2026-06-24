@@ -27,6 +27,7 @@ target_include_directories(iris_common PUBLIC include)
 add_executable(iris_server
     src/server/main.cpp
     src/server/server.cpp
+    src/server/chat.cpp
 )
 target_link_libraries(iris_server PRIVATE iris_common Threads::Threads)
 target_include_directories(iris_server PRIVATE include include/server)
@@ -36,5 +37,5 @@ add_executable(iris_client
     src/client/main.cpp
     src/client/client.cpp
 )
-target_link_libraries(iris_client PRIVATE iris_common)
+target_link_libraries(iris_client PRIVATE iris_common Threads::Threads)
 target_include_directories(iris_client PRIVATE include include/client)

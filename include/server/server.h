@@ -4,7 +4,9 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 
+#include "chat.h"
 #include "socket.h"
 
 enum class ServerError
@@ -30,8 +32,11 @@ private:
     Server() = default;
 
     void handle_connection(std::unique_ptr<iris::network::Socket> conn);
+    void handle_file_request(iris::network::Socket *conn, const std::string &peer);
+    void handle_chat(std::shared_ptr<iris::network::Socket> conn, const std::string &peer);
 
     std::unique_ptr<iris::network::Socket> socket;
     std::filesystem::path searchDir;
+    iris::chat::ChatHub chatHub;
     uint16_t port;
 };

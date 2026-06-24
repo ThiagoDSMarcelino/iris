@@ -35,25 +35,83 @@ namespace iris::protocol
         return value;
     }
 
-    std::vector<std::byte> serialize_request(const std::string &filename)
+    std::optional<MessageType> parse_opcode(const std::byte *data, size_t length)
     {
-        auto nameLength = static_cast<uint16_t>(filename.size());
+        if (length < OPCODE_SIZE)
+        {
+            return std::nullopt;
+        }
 
-        std::vector<std::byte> frame(REQUEST_HEADER_SIZE + filename.size());
-        write_u16(frame.data(), nameLength);
-        std::memcpy(frame.data() + REQUEST_HEADER_SIZE, filename.data(), filename.size());
-
-        return frame;
+        return static_cast<MessageType>(std::to_integer<uint8_t>(data[0]));
     }
 
-    std::optional<uint16_t> parse_request_header(const std::byte *data, size_t length)
+    std::optional<uint16_t> parse_u16_length(const std::byte *data, size_t length)
     {
-        if (length < REQUEST_HEADER_SIZE)
+        if (length < LENGTH_PREFIX_SIZE)
         {
             return std::nullopt;
         }
 
         return read_u16(data);
+    }
+
+    std::vector<std::byte> serialize_file_request(const std::string &filename)
+    {
+        auto nameLength = static_cast<uint16_t>(filename.size());
+
+        std::vector<std::byte> frame(OPCODE_SIZE + LENGTH_PREFIX_SIZE + filename.size());
+        frame[0] = static_cast<std::byte>(MessageType::FileRequest);
+        write_u16(frame.data() + OPCODE_SIZE, nameLength);
+        std::memcpy(frame.data() + OPCODE_SIZE + LENGTH_PREFIX_SIZE, filename.data(), filename.size());
+
+        return frame;
+    }
+
+    std::vector<std::byte> serialize_chat_join(const std::string &nick, const std::string &room)
+    {
+        auto nickLength = static_cast<uint16_t>(nick.size());
+        auto roomLength = static_cast<uint16_t>(room.size());
+
+        std::vector<std::byte> frame(
+            OPCODE_SIZE + LENGTH_PREFIX_SIZE + nick.size() + LENGTH_PREFIX_SIZE + room.size());
+
+        size_t offset = 0;
+        frame[offset] = static_cast<std::byte>(MessageType::ChatJoin);
+        offset += OPCODE_SIZE;
+
+        write_u16(frame.data() + offset, nickLength);
+        offset += LENGTH_PREFIX_SIZE;
+        std::memcpy(frame.data() + offset, nick.data(), nick.size());
+        offset += nick.size();
+
+        write_u16(frame.data() + offset, roomLength);
+        offset += LENGTH_PREFIX_SIZE;
+        std::memcpy(frame.data() + offset, room.data(), room.size());
+
+        return frame;
+    }
+
+    std::vector<std::byte> serialize_chat_message(const std::string &text)
+    {
+        auto textLength = static_cast<uint16_t>(text.size());
+
+        std::vector<std::byte> frame(OPCODE_SIZE + LENGTH_PREFIX_SIZE + text.size());
+        frame[0] = static_cast<std::byte>(MessageType::ChatMessage);
+        write_u16(frame.data() + OPCODE_SIZE, textLength);
+        std::memcpy(frame.data() + OPCODE_SIZE + LENGTH_PREFIX_SIZE, text.data(), text.size());
+
+        return frame;
+    }
+
+    std::vector<std::byte> serialize_chat_line(const std::string &text)
+    {
+        auto textLength = static_cast<uint16_t>(text.size());
+
+        std::vector<std::byte> frame(LENGTH_PREFIX_SIZE + text.size());
+        write_u16(frame.data(), textLength);
+        std::memcpy(frame.data() + LENGTH_PREFIX_SIZE, text.data(), text.size());
+
+        return frame;
     }
 
     std::vector<std::byte> serialize_response_header(Status status, uint64_t length)
