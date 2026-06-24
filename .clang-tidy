@@ -1,0 +1,14 @@
+Checks: >
+  google-*,
+  -google-readability-avoid-underscore-in-googletest-name,
+  -google-upgrade-googletest-case
+
+WarningsAsErrors: "google-*"
+
+HeaderFilterRegex: "include/.*"
+
+FormatStyle: google
+
+CheckOptions:
+  - key: google-readability-todo.CommentStyle
+    value: "(\\w+)"
