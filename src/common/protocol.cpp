@@ -1,89 +1,81 @@
 #include "protocol.h"
 
-#include <arpa/inet.h>
 #include <cstring>
-#include <zlib.h>
 
-#include "log.h"
-
-namespace luft::protocol
+namespace iris::protocol
 {
-    std::vector<std::byte> serialize(uint8_t seq, Code code, uint32_t total, const std::vector<std::byte> &payload)
+    static void write_u16(std::byte *out, uint16_t value)
     {
-        std::vector<std::byte> packet(HEADER_SIZE + payload.size());
-
-        size_t offset = 0;
-
-        packet[offset] = static_cast<std::byte>(seq);
-        offset += sizeof(seq);
-
-        packet[offset] = static_cast<std::byte>(code);
-        offset += sizeof(code);
-
-        uint32_t netTotal = htonl(total);
-        std::memcpy(packet.data() + offset, &netTotal, sizeof(netTotal));
-        offset += sizeof(netTotal);
-
-        uint16_t netSize = htons(static_cast<uint16_t>(payload.size()));
-        std::memcpy(packet.data() + offset, &netSize, sizeof(netSize));
-        offset += sizeof(netSize);
-
-        uint32_t checksum = calculate_checksum(payload);
-        uint32_t netChecksum = htonl(checksum);
-        std::memcpy(packet.data() + offset, &netChecksum, sizeof(netChecksum));
-        offset += sizeof(netChecksum);
-
-        std::memcpy(packet.data() + offset, payload.data(), payload.size());
-
-        return packet;
+        out[0] = static_cast<std::byte>((value >> 8) & 0xFF);
+        out[1] = static_cast<std::byte>(value & 0xFF);
     }
 
-    std::optional<Packet> deserialize(const std::byte *data, size_t length)
+    static uint16_t read_u16(const std::byte *in)
     {
-        if (length < HEADER_SIZE)
+        return static_cast<uint16_t>(
+            (static_cast<uint16_t>(std::to_integer<uint8_t>(in[0])) << 8) |
+            static_cast<uint16_t>(std::to_integer<uint8_t>(in[1])));
+    }
+
+    static void write_u64(std::byte *out, uint64_t value)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            out[i] = static_cast<std::byte>((value >> (8 * (7 - i))) & 0xFF);
+        }
+    }
+
+    static uint64_t read_u64(const std::byte *in)
+    {
+        uint64_t value = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            value = (value << 8) | std::to_integer<uint8_t>(in[i]);
+        }
+        return value;
+    }
+
+    std::vector<std::byte> serialize_request(const std::string &filename)
+    {
+        auto nameLength = static_cast<uint16_t>(filename.size());
+
+        std::vector<std::byte> frame(REQUEST_HEADER_SIZE + filename.size());
+        write_u16(frame.data(), nameLength);
+        std::memcpy(frame.data() + REQUEST_HEADER_SIZE, filename.data(), filename.size());
+
+        return frame;
+    }
+
+    std::optional<uint16_t> parse_request_header(const std::byte *data, size_t length)
+    {
+        if (length < REQUEST_HEADER_SIZE)
         {
             return std::nullopt;
         }
 
-        Packet packet{};
-        size_t offset = 0;
+        return read_u16(data);
+    }
 
-        packet.seq = static_cast<uint8_t>(data[offset]);
-        offset += sizeof(packet.seq);
+    std::vector<std::byte> serialize_response_header(Status status, uint64_t length)
+    {
+        std::vector<std::byte> header(RESPONSE_HEADER_SIZE);
+        header[0] = static_cast<std::byte>(status);
+        write_u64(header.data() + sizeof(uint8_t), length);
 
-        packet.code = static_cast<uint8_t>(data[offset]);
-        offset += sizeof(packet.code);
+        return header;
+    }
 
-        uint32_t netTotal;
-        std::memcpy(&netTotal, data + offset, sizeof(netTotal));
-        packet.total = ntohl(netTotal);
-        offset += sizeof(netTotal);
-
-        uint16_t netSize;
-        std::memcpy(&netSize, data + offset, sizeof(netSize));
-        packet.size = ntohs(netSize);
-        offset += sizeof(netSize);
-
-        uint32_t netChecksum;
-        std::memcpy(&netChecksum, data + offset, sizeof(netChecksum));
-        packet.checksum = ntohl(netChecksum);
-        offset += sizeof(netChecksum);
-
-        packet.payload.assign(data + offset, data + length);
-
-        uint32_t expectedChecksum = calculate_checksum(packet.payload);
-
-        if (packet.checksum != expectedChecksum)
+    std::optional<ResponseHeader> parse_response_header(const std::byte *data, size_t length)
+    {
+        if (length < RESPONSE_HEADER_SIZE)
         {
-            LOG_ERR("Checksum mismatch: expected " << expectedChecksum << ", got " << packet.checksum);
             return std::nullopt;
         }
 
-        return packet;
-    }
+        ResponseHeader header{};
+        header.status = static_cast<Status>(std::to_integer<uint8_t>(data[0]));
+        header.length = read_u64(data + sizeof(uint8_t));
 
-    uint32_t calculate_checksum(const std::vector<std::byte> &packet)
-    {
-        return crc32(0, reinterpret_cast<const uint8_t *>(packet.data()), packet.size());
+        return header;
     }
-} // namespace luft::protocol
+}  // namespace iris::protocol

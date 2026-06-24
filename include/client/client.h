@@ -3,18 +3,18 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 #include "socket.h"
 
 enum class ClientError
 {
     SocketCreationFailed,
+    ConnectFailed,
     SendFailed,
     ReceiveFailed,
-    DeserializeFailed,
     OutputFileFailed,
     InvalidOutputDirectory,
-    Timeout,
 };
 
 const char *to_string(ClientError error);
@@ -33,7 +33,7 @@ private:
 
     std::string resolve_output_path(const char *filename);
 
-    std::unique_ptr<luft::network::Socket> socket;
+    std::unique_ptr<iris::network::Socket> socket;
     const char *ip;
     uint16_t port;
     std::optional<std::filesystem::path> outputDir;

@@ -3,32 +3,32 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
-namespace luft::protocol
+namespace iris::protocol
 {
-    // Wire format: [ seq (1 byte) | code (1 byte) | total (4 bytes) | size (2 bytes) | checksum (4 bytes) | payload (size bytes) ]
-    constexpr size_t HEADER_SIZE = sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t);
-
-    struct Packet
+    enum class Status : uint8_t
     {
-        uint8_t seq;
-        uint8_t code;
-        uint32_t total;
-        uint16_t size;
-        uint32_t checksum;
-        std::vector<std::byte> payload;
+        OK = 0,
+        NOT_FOUND = 1,
+        ERROR = 2,
     };
 
-    enum class Code : uint8_t
+    constexpr size_t REQUEST_HEADER_SIZE = sizeof(uint16_t);                    // 2
+    constexpr size_t RESPONSE_HEADER_SIZE = sizeof(uint8_t) + sizeof(uint64_t); // 9
+
+    struct ResponseHeader
     {
-        DATA,
-        ERROR,
-        ACK,
-        NACK,
+        Status status;
+        uint64_t length;
     };
 
-    std::vector<std::byte> serialize(uint8_t seq, Code code, uint32_t total, const std::vector<std::byte> &payload);
-    std::optional<Packet> deserialize(const std::byte *data, size_t length);
-    uint32_t calculate_checksum(const std::vector<std::byte> &packet);
-}  // namespace luft::protocol
+    // Request
+    std::vector<std::byte> serialize_request(const std::string &filename);
+    std::optional<uint16_t> parse_request_header(const std::byte *data, size_t length);
+
+    // Response
+    std::vector<std::byte> serialize_response_header(Status status, uint64_t length);
+    std::optional<ResponseHeader> parse_response_header(const std::byte *data, size_t length);
+} // namespace iris::protocol

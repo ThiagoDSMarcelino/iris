@@ -1,3 +1,6 @@
+#include <cstdint>
+#include <string>
+
 #include "client.h"
 #include "log.h"
 

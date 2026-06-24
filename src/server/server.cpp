@@ -1,15 +1,12 @@
 #include "server.h"
 
-#include <chrono>
-#include <cstring>
+#include <fstream>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "log.h"
-#include "server/chunk.h"
-#include "server/rtt.h"
 #include "protocol.h"
-
-constexpr uint8_t MAX_TIMEOUTS = 5;
 
 const char *to_string(ServerError error)
 {
@@ -23,19 +20,22 @@ const char *to_string(ServerError error)
 
     case ServerError::BindFailed:
         return "bind failed";
+
+    case ServerError::ListenFailed:
+        return "listen failed";
     }
 
     return "unknown error";
 }
 
-std::expected<std::shared_ptr<Server>, ServerError> Server::create(uint16_t port, const char *searchDir, FaultConfig faultConfig)
+std::expected<std::shared_ptr<Server>, ServerError> Server::create(uint16_t port, const char *searchDir)
 {
     if (!std::filesystem::is_directory(searchDir))
     {
         return std::unexpected(ServerError::InvalidDirectory);
     }
 
-    auto socketResult = luft::network::Socket::create();
+    auto socketResult = iris::network::Socket::create();
     if (!socketResult.has_value())
     {
         return std::unexpected(ServerError::SocketCreationFailed);
@@ -45,7 +45,6 @@ std::expected<std::shared_ptr<Server>, ServerError> Server::create(uint16_t port
     server->socket = std::move(socketResult.value());
     server->searchDir = std::filesystem::path(searchDir);
     server->port = port;
-    server->faultInjector = FaultInjector(faultConfig);
 
     return server;
 }
@@ -58,170 +57,117 @@ std::optional<ServerError> Server::serve()
         return ServerError::BindFailed;
     }
 
+    if (!this->socket->listen())
+    {
+        LOG_ERR("Failed to listen on port " << this->port);
+        return ServerError::ListenFailed;
+    }
+
     LOG("Server listening on port " << this->port);
 
     while (true)
     {
-        auto message = this->socket->receive();
-
-        if (!message)
+        auto conn = this->socket->accept();
+        if (!conn)
         {
-            LOG_ERR("Failed to receive");
+            LOG_ERR("Failed to accept connection");
             continue;
         }
 
-        std::string ip = message->senderIp;
-        uint16_t port = message->senderPort;
-
-        auto session = sessionManager.find(ip, port);
-        if (session)
-        {
-            std::lock_guard qLock(session->mutex);
-            session->queue.push(*message);
-            session->cv.notify_one();
-        }
-        else
-        {
-            auto packetResult = luft::protocol::deserialize(message->data, message->size);
-            if (!packetResult)
-            {
-                continue;
-            }
-
-            if (packetResult->code != static_cast<uint8_t>(luft::protocol::Code::DATA))
-            {
-                continue;
-            }
-
-            auto newSession = sessionManager.create(ip, port);
-
-            LOG("New session for " << ip << ":" << port);
-
-            auto self = shared_from_this();
-            std::thread([self, newSession, packet = std::move(*packetResult), ip, port]()
-                        {
-                self->handle_session(newSession, std::move(packet));
-                self->sessionManager.remove(ip, port);
-                LOG("Session closed for " << ip << ":" << port); })
-                .detach();
-        }
+        auto self = shared_from_this();
+        std::thread([self, sock = std::move(*conn)]() mutable
+                    { self->handle_connection(std::move(sock)); })
+            .detach();
     }
 
     return std::nullopt;
 }
 
-void Server::send_packet(const char *ip, uint16_t port, std::vector<std::byte> packet)
+static void send_status(iris::network::Socket *conn, iris::protocol::Status status, const std::string &message)
 {
-    auto result = this->faultInjector.inject(std::move(packet));
-    if (!result)
-    {
-        return;
-    }
-
-    this->socket->send(ip, port, result->data(), result->size());
+    auto header = iris::protocol::serialize_response_header(status, message.size());
+    conn->send_all(header.data(), header.size());
+    conn->send_all(message.data(), message.size());
 }
 
-static std::vector<std::byte> error_packet(const char *message)
+void Server::handle_connection(std::unique_ptr<iris::network::Socket> conn)
 {
-    auto messagePtr = reinterpret_cast<const std::byte *>(message);
-    std::vector<std::byte> payload(messagePtr, messagePtr + std::strlen(message));
+    std::string peer = std::string(conn->peer_ip()) + ":" + std::to_string(conn->peer_port());
+    LOG("New connection from " << peer);
 
-    auto packet = luft::protocol::serialize(0, luft::protocol::Code::ERROR, 1, payload);
-    return packet;
-}
-
-void Server::handle_session(std::shared_ptr<Session> session, luft::protocol::Packet packet)
-{
-    std::string_view filename(reinterpret_cast<const char *>(packet.payload.data()), packet.payload.size());
-
-    auto path = searchDir / filename;
-
-    bool exists = std::filesystem::exists(path);
-
-    if (!exists)
+    std::byte header[iris::protocol::REQUEST_HEADER_SIZE];
+    if (!conn->receive_all(header, sizeof(header)))
     {
-        auto errPacket = error_packet("File not found");
-        send_packet(session->clientIp.c_str(), session->clientPort, errPacket);
+        LOG_ERR("Failed to read request header from " << peer);
         return;
     }
 
-    auto chunkedResult = chunk_file(path, PAYLOAD_SIZE);
-
-    if (!chunkedResult.has_value())
+    auto nameLength = iris::protocol::parse_request_header(header, sizeof(header));
+    if (!nameLength || *nameLength == 0)
     {
-        LOG_ERR("Failed to chunk file: " << to_string(chunkedResult.error()));
+        LOG_ERR("Invalid request from " << peer);
         return;
     }
 
-    uint8_t seq = 0;
-    RttEstimator rtt;
-
-    for (const auto &chunk : chunkedResult->chunks)
+    std::string filename(*nameLength, '\0');
+    if (!conn->receive_all(filename.data(), *nameLength))
     {
-        auto dataPacket = luft::protocol::serialize(seq, luft::protocol::Code::DATA, chunkedResult->total, chunk.payload);
-
-        auto sendTime = std::chrono::steady_clock::now();
-        send_packet(session->clientIp.c_str(), session->clientPort, dataPacket);
-
-        uint8_t timeouts = 0;
-
-    wait_for_ack:
-        luft::network::Message ackMsg;
-        {
-            std::unique_lock lock(session->mutex);
-            bool received = session->cv.wait_for(
-                lock,
-                std::chrono::milliseconds(rtt.timeout_ms()),
-                [&session]
-                { return !session->queue.empty(); });
-
-            if (!received)
-            {
-                if (++timeouts > MAX_TIMEOUTS)
-                {
-                    LOG_ERR("Max timeouts reached, aborting transfer");
-                    return;
-                }
-                LOG_ERR("Timeout waiting for ACK, retransmitting (" << (int)timeouts << "/" << (int)MAX_TIMEOUTS << ")");
-                sendTime = std::chrono::steady_clock::now();
-                send_packet(session->clientIp.c_str(), session->clientPort, dataPacket);
-                goto wait_for_ack;
-            }
-
-            ackMsg = session->queue.front();
-            session->queue.pop();
-        }
-
-        auto ackPacketResult = luft::protocol::deserialize(ackMsg.data, ackMsg.size);
-
-        if (!ackPacketResult)
-        {
-            LOG_ERR("Failed to deserialize ACK, retransmitting");
-            sendTime = std::chrono::steady_clock::now();
-            send_packet(session->clientIp.c_str(), session->clientPort, dataPacket);
-            goto wait_for_ack;
-        }
-
-        // Reset timeouts on successful ACK reception
-        // Client responses independent if is a NACK or ACK, since both are valid responses to the sent packet
-        timeouts = 0;
-
-        auto ackPacket = ackPacketResult.value();
-
-        if (ackPacket.code != static_cast<uint8_t>(luft::protocol::Code::ACK) || ackPacket.seq != seq)
-        {
-            sendTime = std::chrono::steady_clock::now();
-            send_packet(session->clientIp.c_str(), session->clientPort, dataPacket);
-            goto wait_for_ack;
-        }
-
-        {
-            auto sampleRtt = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sendTime).count();
-            rtt.update(sampleRtt);
-        }
-
-        seq = !seq;
+        LOG_ERR("Failed to read filename from " << peer);
+        return;
     }
 
-    return;
+    auto path = this->searchDir / filename;
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+    {
+        send_status(conn.get(), iris::protocol::Status::NOT_FOUND, "File not found");
+        LOG("File not found: " << filename);
+        return;
+    }
+
+    uint64_t fileSize = std::filesystem::file_size(path, ec);
+    if (ec)
+    {
+        send_status(conn.get(), iris::protocol::Status::ERROR, "Failed to stat file");
+        LOG_ERR("Failed to stat file: " << filename);
+        return;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+    {
+        send_status(conn.get(), iris::protocol::Status::ERROR, "Failed to open file");
+        LOG_ERR("Failed to open file: " << filename);
+        return;
+    }
+
+    auto responseHeader = iris::protocol::serialize_response_header(iris::protocol::Status::OK, fileSize);
+    if (!conn->send_all(responseHeader.data(), responseHeader.size()))
+    {
+        LOG_ERR("Failed to send response header to " << peer);
+        return;
+    }
+
+    std::vector<std::byte> buffer(iris::network::BUFFER_SIZE);
+    uint64_t sent = 0;
+
+    while (sent < fileSize)
+    {
+        file.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+        auto chunk = static_cast<size_t>(file.gcount());
+        if (chunk == 0)
+        {
+            break;
+        }
+
+        if (!conn->send_all(buffer.data(), chunk))
+        {
+            LOG_ERR("Failed to send file data to " << peer);
+            return;
+        }
+        sent += chunk;
+    }
+
+    LOG("Sent \"" << filename << "\" (" << sent << " bytes) to " << peer);
 }

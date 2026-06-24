@@ -1,46 +1,46 @@
 #pragma once
 
 #include <cstddef>
-#include <expected>
-#include <netinet/in.h>
+#include <cstdint>
 #include <memory>
+#include <netinet/in.h>
 #include <optional>
 
-namespace luft::network
+namespace iris::network
 {
-    enum class ReceiveError
-    {
-        Timeout,
-        Failed,
-    };
-    constexpr size_t BUFFER_SIZE = 1024; // 1 KB
-
-    struct Message
-    {
-        std::byte data[BUFFER_SIZE];
-        char senderIp[INET_ADDRSTRLEN];
-        size_t size;
-        uint16_t senderPort;
-    };
+    constexpr size_t BUFFER_SIZE = 64 * 1024; // 64 KB stream buffer
 
     class Socket
     {
     public:
         ~Socket();
 
+        Socket(const Socket &) = delete;
+        Socket &operator=(const Socket &) = delete;
+
         static std::optional<std::unique_ptr<Socket>> create();
 
-        bool send(
-            const char *ip, uint16_t port,
-            const void *data, size_t length);
-
+        // Server side
         bool bind(uint16_t port);
+        bool listen(int backlog = 16);
+        std::optional<std::unique_ptr<Socket>> accept();
 
-        std::optional<Message> receive();
-        std::expected<Message, ReceiveError> receive_with_timeout(uint32_t milliseconds);
+        // Client side
+        bool connect(const char *ip, uint16_t port);
+
+        // Stream I/O (connected socket)
+        bool send_all(const void *data, size_t length);
+        std::optional<size_t> receive(void *buffer, size_t length); // 0 == peer closed
+        bool receive_all(void *buffer, size_t length);
+
+        const char *peer_ip() const;
+        uint16_t peer_port() const;
 
     private:
         Socket() = default;
-        int fileDescriptor;
+
+        int fileDescriptor = -1;
+        char peerIp[INET_ADDRSTRLEN] = {};
+        uint16_t peerPort = 0;
     };
-}  // namespace luft::network
+} // namespace iris::network

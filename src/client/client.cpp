@@ -1,14 +1,13 @@
 #include "client.h"
 
+#include <algorithm>
 #include <fstream>
-#include <cstring>
+#include <vector>
 
 #include "log.h"
 #include "protocol.h"
 
 namespace fs = std::filesystem;
-
-constexpr uint32_t TIMEOUT_MS = 30000;
 
 std::string Client::resolve_output_path(const char *filename)
 {
@@ -34,18 +33,16 @@ const char *to_string(ClientError error)
     {
     case ClientError::SocketCreationFailed:
         return "socket creation failed";
+    case ClientError::ConnectFailed:
+        return "connect failed";
     case ClientError::SendFailed:
         return "send failed";
     case ClientError::ReceiveFailed:
         return "receive failed";
-    case ClientError::DeserializeFailed:
-        return "deserialize failed";
     case ClientError::OutputFileFailed:
         return "output file failed";
     case ClientError::InvalidOutputDirectory:
         return "invalid output directory";
-    case ClientError::Timeout:
-        return "timeout";
     }
 
     return "unknown error";
@@ -53,7 +50,7 @@ const char *to_string(ClientError error)
 
 std::expected<std::unique_ptr<Client>, ClientError> Client::create(const char *ip, uint16_t port, const char *outputDir)
 {
-    auto socketResult = luft::network::Socket::create();
+    auto socketResult = iris::network::Socket::create();
     if (!socketResult)
     {
         return std::unexpected(ClientError::SocketCreationFailed);
@@ -74,13 +71,38 @@ std::expected<std::unique_ptr<Client>, ClientError> Client::create(const char *i
 
 std::optional<ClientError> Client::fetch(const char *filename)
 {
-    auto filenamePtr = reinterpret_cast<const std::byte *>(filename);
-    std::vector<std::byte> payload(filenamePtr, filenamePtr + std::strlen(filename));
-    auto packet = luft::protocol::serialize(0, luft::protocol::Code::DATA, 1, payload);
+    if (!this->socket->connect(this->ip, this->port))
+    {
+        return ClientError::ConnectFailed;
+    }
 
-    if (!this->socket->send(this->ip, this->port, packet.data(), packet.size()))
+    auto request = iris::protocol::serialize_request(filename);
+    if (!this->socket->send_all(request.data(), request.size()))
     {
         return ClientError::SendFailed;
+    }
+
+    std::byte headerBuf[iris::protocol::RESPONSE_HEADER_SIZE];
+    if (!this->socket->receive_all(headerBuf, sizeof(headerBuf)))
+    {
+        return ClientError::ReceiveFailed;
+    }
+
+    auto header = iris::protocol::parse_response_header(headerBuf, sizeof(headerBuf));
+    if (!header)
+    {
+        return ClientError::ReceiveFailed;
+    }
+
+    if (header->status != iris::protocol::Status::OK)
+    {
+        std::string message(header->length, '\0');
+        if (header->length > 0 && !this->socket->receive_all(message.data(), header->length))
+        {
+            return ClientError::ReceiveFailed;
+        }
+        PRINT_ERR("Server error: " << message);
+        return ClientError::ReceiveFailed;
     }
 
     std::string outputPath = this->resolve_output_path(filename);
@@ -98,71 +120,29 @@ std::optional<ClientError> Client::fetch(const char *filename)
         return err;
     };
 
-    uint32_t packetsCount = 0;
-    uint8_t seq = 0;
-    while (true)
+    std::vector<std::byte> buffer(iris::network::BUFFER_SIZE);
+    uint64_t received = 0;
+
+    while (received < header->length)
     {
-        auto message = this->socket->receive_with_timeout(TIMEOUT_MS);
-        if (!message)
-        {
-            if (message.error() == luft::network::ReceiveError::Timeout)
-            {
-                return cleanup(ClientError::Timeout);
-            }
+        auto want = static_cast<size_t>(std::min<uint64_t>(buffer.size(), header->length - received));
 
-            LOG_ERR("Failed to receive message");
-            const auto ackPacket = luft::protocol::serialize(seq, luft::protocol::Code::NACK, 0, {});
-            this->socket->send(this->ip, this->port, ackPacket.data(), ackPacket.size());
-            continue;
+        auto got = this->socket->receive(buffer.data(), want);
+        if (!got || *got == 0)
+        {
+            return cleanup(ClientError::ReceiveFailed); // premature end of stream
         }
 
-        auto packetResult = luft::protocol::deserialize(message->data, message->size);
-        if (!packetResult)
+        output.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(*got));
+        if (!output)
         {
-            LOG_ERR("Failed to deserialize packet");
-            const auto ackPacket = luft::protocol::serialize(seq, luft::protocol::Code::NACK, 0, {});
-            this->socket->send(this->ip, this->port, ackPacket.data(), ackPacket.size());
-            continue;
+            return cleanup(ClientError::OutputFileFailed);
         }
 
-        auto packet = packetResult.value();
-
-        if (packet.seq != seq)
-        {
-            LOG_ERR("Unexpected sequence number: " << static_cast<int>(packet.seq) << ", expected: " << static_cast<int>(seq));
-            const auto ackPacket = luft::protocol::serialize(packet.seq, luft::protocol::Code::NACK, 0, {});
-            this->socket->send(this->ip, this->port, ackPacket.data(), ackPacket.size());
-            continue;
-        }
-
-        if (packet.code == static_cast<uint8_t>(luft::protocol::Code::ERROR))
-        {
-            std::string errorMessage(reinterpret_cast<const char *>(packet.payload.data()), packet.payload.size());
-            PRINT_ERR("Server error: " << errorMessage);
-            return cleanup(ClientError::ReceiveFailed);
-        }
-
-        if (packet.code != static_cast<uint8_t>(luft::protocol::Code::DATA))
-        {
-            LOG_ERR("Unexpected packet code: " << static_cast<int>(packet.code));
-            return cleanup(ClientError::ReceiveFailed);
-        }
-
-        output.write(reinterpret_cast<const char *>(packet.payload.data()), packet.size);
-
-        packetsCount++;
-        LOG("Received packet " << packetsCount << "/" << packet.total << " with " << packet.size << " bytes of payload");
-
-        const auto ackPacket = luft::protocol::serialize(seq, luft::protocol::Code::ACK, 0, {});
-        this->socket->send(this->ip, this->port, ackPacket.data(), ackPacket.size());
-        seq = !seq;
-
-        if (packetsCount == packet.total)
-        {
-            PRINT("File \"" << filename << "\" received successfully");
-            break;
-        }
+        received += *got;
+        LOG("Received " << received << "/" << header->length << " bytes");
     }
 
+    PRINT("File \"" << filename << "\" received successfully (" << received << " bytes)");
     return std::nullopt;
 }
