@@ -185,15 +185,17 @@ std::optional<ClientError> Client::fetch(const char *filename, const char *outpu
     }
 
     auto actual = hasher.finalize();
+
+    PRINT("Expected checksum: " << iris::crypto::to_hex(expected));
+    PRINT("Actual checksum:   " << iris::crypto::to_hex(actual));
+
     if (actual != expected)
     {
-        PRINT_ERR("Checksum mismatch: expected " << iris::crypto::to_hex(expected)
-                                                 << ", got " << iris::crypto::to_hex(actual));
+        PRINT_ERR("Checksum mismatch");
         return cleanup(ClientError::ChecksumMismatch);
     }
 
-    PRINT("File \"" << filename << "\" received successfully (" << received << " bytes, sha256="
-                    << iris::crypto::to_hex(actual) << ")");
+    PRINT("File \"" << filename << "\" received successfully, saved to \"" << outputPath << "\"");
     return std::nullopt;
 }
 
