@@ -21,7 +21,7 @@ std::optional<std::unique_ptr<Socket>> Socket::create()
     int sockfd = socket(
         AF_INET,     // IPv4
         SOCK_STREAM, // TCP
-        0            // Default protocol
+        0            // Automatic
     );
 
     if (sockfd < 0)
@@ -121,7 +121,7 @@ std::optional<size_t> Socket::receive(void *buffer, size_t length)
             }
             return std::nullopt;
         }
-        return static_cast<size_t>(got); // 0 == peer performed an orderly shutdown
+        return static_cast<size_t>(got);
     }
 }
 
@@ -135,8 +135,9 @@ bool Socket::receive_all(void *buffer, size_t length)
         auto got = this->receive(cursor + received, length - received);
         if (!got || *got == 0)
         {
-            return false; // error or premature end of stream
+            return false;
         }
+
         received += *got;
     }
 

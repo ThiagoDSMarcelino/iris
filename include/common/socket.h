@@ -8,7 +8,7 @@
 
 namespace iris::network
 {
-    constexpr size_t BUFFER_SIZE = 64 * 1024; // 64 KB stream buffer
+    constexpr size_t BUFFER_SIZE = 64 * 1024;
 
     class Socket
     {
@@ -20,20 +20,16 @@ namespace iris::network
 
         static std::optional<std::unique_ptr<Socket>> create();
 
-        // Server side
         bool bind(uint16_t port);
         bool listen(int backlog = 16);
         std::optional<std::unique_ptr<Socket>> accept();
 
-        // Client side
         bool connect(const char *ip, uint16_t port);
 
-        // Stream I/O (connected socket)
         bool send_all(const void *data, size_t length);
-        std::optional<size_t> receive(void *buffer, size_t length); // 0 == peer closed
+        std::optional<size_t> receive(void *buffer, size_t length);
         bool receive_all(void *buffer, size_t length);
 
-        // Raw file descriptor, for multiplexing with poll()/select().
         int native_handle() const;
 
         const char *peer_ip() const;

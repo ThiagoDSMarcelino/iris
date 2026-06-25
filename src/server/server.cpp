@@ -163,8 +163,8 @@ void Server::handle_file_request(iris::network::Socket *conn, const std::string 
     uint64_t fileSize = std::filesystem::file_size(path, ec);
     if (ec)
     {
-        send_status(conn, iris::protocol::Status::ERROR, "Failed to stat file");
-        LOG_ERR("Failed to stat file: " << filename);
+        send_status(conn, iris::protocol::Status::ERROR, "Could not read file information");
+        LOG_ERR("Could not read file information: " << filename);
         return;
     }
 
@@ -251,7 +251,7 @@ void Server::handle_chat(std::shared_ptr<iris::network::Socket> conn, const std:
         std::byte opcodeBuf[iris::protocol::OPCODE_SIZE];
         if (!conn->receive_all(opcodeBuf, sizeof(opcodeBuf)))
         {
-            break; // peer disconnected
+            break;
         }
 
         auto opcode = iris::protocol::parse_opcode(opcodeBuf, sizeof(opcodeBuf));

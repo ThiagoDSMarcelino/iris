@@ -10,7 +10,7 @@ namespace iris::chat
     {
         {
             std::lock_guard<std::mutex> lock(this->mutex);
-            this->rooms[room].push_back(client); // creates the room if absent
+            this->rooms[room].push_back(client);
         }
 
         this->system_message(room, "*** " + client->nick + " entrou na sala '" + room + "' ***");
@@ -43,7 +43,7 @@ namespace iris::chat
         {
             if (member == sender)
             {
-                continue; // the sender already sees their own message locally
+                continue;
             }
             send_line(member, line);
         }
@@ -67,7 +67,7 @@ namespace iris::chat
             return {};
         }
 
-        return it->second; // copy keeps each member alive past a concurrent disconnect
+        return it->second;
     }
 
     void ChatHub::send_line(const std::shared_ptr<ChatClient> &client, const std::string &line)

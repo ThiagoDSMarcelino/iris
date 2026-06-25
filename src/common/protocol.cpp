@@ -60,9 +60,16 @@ namespace iris::protocol
         auto nameLength = static_cast<uint16_t>(filename.size());
 
         std::vector<std::byte> frame(OPCODE_SIZE + LENGTH_PREFIX_SIZE + filename.size());
-        frame[0] = static_cast<std::byte>(MessageType::FileRequest);
-        write_u16(frame.data() + OPCODE_SIZE, nameLength);
-        std::memcpy(frame.data() + OPCODE_SIZE + LENGTH_PREFIX_SIZE, filename.data(), filename.size());
+
+        size_t offset = 0;
+
+        frame[offset] = static_cast<std::byte>(MessageType::FileRequest);
+        offset += OPCODE_SIZE;
+
+        write_u16(frame.data() + offset, nameLength);
+        offset += LENGTH_PREFIX_SIZE;
+
+        std::memcpy(frame.data() + offset, filename.data(), filename.size());
 
         return frame;
     }
@@ -76,16 +83,19 @@ namespace iris::protocol
             OPCODE_SIZE + LENGTH_PREFIX_SIZE + nick.size() + LENGTH_PREFIX_SIZE + room.size());
 
         size_t offset = 0;
+
         frame[offset] = static_cast<std::byte>(MessageType::ChatJoin);
         offset += OPCODE_SIZE;
 
         write_u16(frame.data() + offset, nickLength);
         offset += LENGTH_PREFIX_SIZE;
+
         std::memcpy(frame.data() + offset, nick.data(), nick.size());
         offset += nick.size();
 
         write_u16(frame.data() + offset, roomLength);
         offset += LENGTH_PREFIX_SIZE;
+
         std::memcpy(frame.data() + offset, room.data(), room.size());
 
         return frame;
@@ -96,9 +106,16 @@ namespace iris::protocol
         auto textLength = static_cast<uint16_t>(text.size());
 
         std::vector<std::byte> frame(OPCODE_SIZE + LENGTH_PREFIX_SIZE + text.size());
-        frame[0] = static_cast<std::byte>(MessageType::ChatMessage);
-        write_u16(frame.data() + OPCODE_SIZE, textLength);
-        std::memcpy(frame.data() + OPCODE_SIZE + LENGTH_PREFIX_SIZE, text.data(), text.size());
+
+        size_t offset = 0;
+
+        frame[offset] = static_cast<std::byte>(MessageType::ChatMessage);
+        offset += OPCODE_SIZE;
+
+        write_u16(frame.data() + offset, textLength);
+        offset += LENGTH_PREFIX_SIZE;
+
+        std::memcpy(frame.data() + offset, text.data(), text.size());
 
         return frame;
     }
@@ -136,4 +153,4 @@ namespace iris::protocol
 
         return header;
     }
-}  // namespace iris::protocol
+} // namespace iris::protocol

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <vector>
@@ -14,40 +15,36 @@
 
 namespace fs = std::filesystem;
 
-namespace
+static std::optional<std::string> receive_chat_line(iris::network::Socket *sock)
 {
-    // Reads one server -> client chat line frame: [u16 length][text].
-    std::optional<std::string> receive_chat_line(iris::network::Socket *sock)
+    std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
+    if (!sock->receive_all(lengthBuf, sizeof(lengthBuf)))
     {
-        std::byte lengthBuf[iris::protocol::LENGTH_PREFIX_SIZE];
-        if (!sock->receive_all(lengthBuf, sizeof(lengthBuf)))
-        {
-            return std::nullopt;
-        }
-
-        auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
-        if (!length)
-        {
-            return std::nullopt;
-        }
-
-        std::string line(*length, '\0');
-        if (*length > 0 && !sock->receive_all(line.data(), *length))
-        {
-            return std::nullopt;
-        }
-
-        return line;
+        return std::nullopt;
     }
-} // namespace
 
-std::string Client::resolve_output_path(const char *filename)
+    auto length = iris::protocol::parse_u16_length(lengthBuf, sizeof(lengthBuf));
+    if (!length)
+    {
+        return std::nullopt;
+    }
+
+    std::string line(*length, '\0');
+    if (*length > 0 && !sock->receive_all(line.data(), *length))
+    {
+        return std::nullopt;
+    }
+
+    return line;
+}
+
+static std::string resolve_output_path(const char *filename, const std::optional<fs::path> &outputDir)
 {
     fs::path base(filename);
 
     fs::path stem = base.stem();
     fs::path ext = base.extension();
-    fs::path dir = this->outputDir.has_value() ? this->outputDir.value() : base.parent_path();
+    fs::path dir = outputDir.has_value() ? outputDir.value() : base.parent_path();
 
     fs::path candidate = dir / (stem.string() + ext.string());
 
@@ -80,7 +77,7 @@ const char *to_string(ClientError error)
     return "unknown error";
 }
 
-std::expected<std::unique_ptr<Client>, ClientError> Client::create(const char *ip, uint16_t port, const char *outputDir)
+std::expected<std::unique_ptr<Client>, ClientError> Client::create(const char *ip, uint16_t port)
 {
     auto socketResult = iris::network::Socket::create();
     if (!socketResult)
@@ -88,21 +85,20 @@ std::expected<std::unique_ptr<Client>, ClientError> Client::create(const char *i
         return std::unexpected(ClientError::SocketCreationFailed);
     }
 
-    if (outputDir && (!fs::exists(outputDir) || !fs::is_directory(outputDir)))
-    {
-        return std::unexpected(ClientError::InvalidOutputDirectory);
-    }
-
     auto client = std::unique_ptr<Client>(new Client());
     client->socket = std::move(socketResult.value());
     client->ip = ip;
     client->port = port;
-    client->outputDir = outputDir ? std::optional<fs::path>(fs::path(outputDir)) : std::nullopt;
     return client;
 }
 
-std::optional<ClientError> Client::fetch(const char *filename)
+std::optional<ClientError> Client::fetch(const char *filename, const char *outputDir)
 {
+    if (outputDir && (!fs::exists(outputDir) || !fs::is_directory(outputDir)))
+    {
+        return ClientError::InvalidOutputDirectory;
+    }
+
     if (!this->socket->connect(this->ip, this->port))
     {
         return ClientError::ConnectFailed;
@@ -137,7 +133,8 @@ std::optional<ClientError> Client::fetch(const char *filename)
         return ClientError::ReceiveFailed;
     }
 
-    std::string outputPath = this->resolve_output_path(filename);
+    std::optional<fs::path> outputDirPath = outputDir ? std::optional<fs::path>(fs::path(outputDir)) : std::nullopt;
+    std::string outputPath = resolve_output_path(filename, outputDirPath);
 
     std::ofstream output(outputPath, std::ios::binary);
     if (!output)
@@ -162,7 +159,7 @@ std::optional<ClientError> Client::fetch(const char *filename)
         auto got = this->socket->receive(buffer.data(), want);
         if (!got || *got == 0)
         {
-            return cleanup(ClientError::ReceiveFailed); // premature end of stream
+            return cleanup(ClientError::ReceiveFailed);
         }
 
         output.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(*got));
@@ -196,8 +193,6 @@ std::optional<ClientError> Client::chat(const std::string &nick, const std::stri
 
     iris::network::Socket *sock = this->socket.get();
 
-    // Single loop multiplexing stdin and the socket with poll(), so a server
-    // disconnect is noticed immediately instead of only after the next Enter.
     struct pollfd fds[2] = {};
     fds[0].fd = STDIN_FILENO;
     fds[0].events = POLLIN;
@@ -218,7 +213,6 @@ std::optional<ClientError> Client::chat(const std::string &nick, const std::stri
             break;
         }
 
-        // Incoming chat lines (or a closed connection) from the server.
         if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
         {
             auto line = receive_chat_line(sock);
@@ -230,15 +224,13 @@ std::optional<ClientError> Client::chat(const std::string &nick, const std::stri
             PRINT(*line);
         }
 
-        // Keyboard input. Assemble whole lines so poll() stays correct even when
-        // several arrive in one read.
         if (fds[0].revents & (POLLIN | POLLHUP))
         {
             char buffer[4096];
             ssize_t got = ::read(STDIN_FILENO, buffer, sizeof(buffer));
             if (got <= 0)
             {
-                break; // stdin closed (EOF / Ctrl-D)
+                break;
             }
             stdinBuffer.append(buffer, static_cast<size_t>(got));
 
@@ -263,7 +255,8 @@ std::optional<ClientError> Client::chat(const std::string &nick, const std::stri
                 }
                 if (message.size() > std::numeric_limits<uint16_t>::max())
                 {
-                    message.resize(std::numeric_limits<uint16_t>::max());
+                    PRINT_ERR("Mensagem muito longa (máximo " << std::numeric_limits<uint16_t>::max() << " bytes).");
+                    continue;
                 }
 
                 auto frame = iris::protocol::serialize_chat_message(message);

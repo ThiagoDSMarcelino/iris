@@ -1,7 +1,6 @@
 #pragma once
 
 #include <expected>
-#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,18 +24,15 @@ class Client
 public:
     ~Client() = default;
 
-    static std::expected<std::unique_ptr<Client>, ClientError> create(const char *ip, uint16_t port, const char *outputDir = nullptr);
+    static std::expected<std::unique_ptr<Client>, ClientError> create(const char *ip, uint16_t port);
 
-    std::optional<ClientError> fetch(const char *filename);
+    std::optional<ClientError> fetch(const char *filename, const char *outputDir = nullptr);
     std::optional<ClientError> chat(const std::string &nick, const std::string &room);
 
 private:
     Client() = default;
 
-    std::string resolve_output_path(const char *filename);
-
     std::unique_ptr<iris::network::Socket> socket;
     const char *ip;
     uint16_t port;
-    std::optional<std::filesystem::path> outputDir;
 };
