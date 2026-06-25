@@ -9,6 +9,7 @@
 
 #include "log.h"
 #include "protocol.h"
+#include "sha256.h"
 
 const char *to_string(ServerError error)
 {
@@ -183,6 +184,7 @@ void Server::handle_file_request(iris::network::Socket *conn, const std::string 
         return;
     }
 
+    iris::crypto::Sha256 hasher;
     std::vector<std::byte> buffer(iris::network::BUFFER_SIZE);
     uint64_t sent = 0;
 
@@ -195,6 +197,8 @@ void Server::handle_file_request(iris::network::Socket *conn, const std::string 
             break;
         }
 
+        hasher.update(buffer.data(), chunk);
+
         if (!conn->send_all(buffer.data(), chunk))
         {
             LOG_ERR("Failed to send file data to " << peer);
@@ -203,7 +207,15 @@ void Server::handle_file_request(iris::network::Socket *conn, const std::string 
         sent += chunk;
     }
 
-    LOG("Sent \"" << filename << "\" (" << sent << " bytes) to " << peer);
+    auto digest = hasher.finalize();
+    if (!conn->send_all(digest.data(), digest.size()))
+    {
+        LOG_ERR("Failed to send checksum to " << peer);
+        return;
+    }
+
+    LOG("Sent \"" << filename << "\" (" << sent << " bytes, sha256=" << iris::crypto::to_hex(digest)
+                  << ") to " << peer);
 }
 
 static std::optional<std::string> read_length_prefixed(iris::network::Socket *conn)

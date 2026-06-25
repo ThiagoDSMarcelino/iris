@@ -15,6 +15,7 @@ enum class ClientError
     ReceiveFailed,
     OutputFileFailed,
     InvalidOutputDirectory,
+    ChecksumMismatch,
 };
 
 const char *to_string(ClientError error);

@@ -12,6 +12,7 @@
 
 #include "log.h"
 #include "protocol.h"
+#include "sha256.h"
 
 namespace fs = std::filesystem;
 
@@ -72,6 +73,8 @@ const char *to_string(ClientError error)
         return "output file failed";
     case ClientError::InvalidOutputDirectory:
         return "invalid output directory";
+    case ClientError::ChecksumMismatch:
+        return "checksum mismatch";
     }
 
     return "unknown error";
@@ -149,6 +152,7 @@ std::optional<ClientError> Client::fetch(const char *filename, const char *outpu
         return err;
     };
 
+    iris::crypto::Sha256 hasher;
     std::vector<std::byte> buffer(iris::network::BUFFER_SIZE);
     uint64_t received = 0;
 
@@ -162,6 +166,8 @@ std::optional<ClientError> Client::fetch(const char *filename, const char *outpu
             return cleanup(ClientError::ReceiveFailed);
         }
 
+        hasher.update(buffer.data(), *got);
+
         output.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(*got));
         if (!output)
         {
@@ -172,7 +178,22 @@ std::optional<ClientError> Client::fetch(const char *filename, const char *outpu
         LOG("Received " << received << "/" << header->length << " bytes");
     }
 
-    PRINT("File \"" << filename << "\" received successfully (" << received << " bytes)");
+    iris::crypto::Sha256Digest expected{};
+    if (!this->socket->receive_all(expected.data(), expected.size()))
+    {
+        return cleanup(ClientError::ReceiveFailed);
+    }
+
+    auto actual = hasher.finalize();
+    if (actual != expected)
+    {
+        PRINT_ERR("Checksum mismatch: expected " << iris::crypto::to_hex(expected)
+                                                 << ", got " << iris::crypto::to_hex(actual));
+        return cleanup(ClientError::ChecksumMismatch);
+    }
+
+    PRINT("File \"" << filename << "\" received successfully (" << received << " bytes, sha256="
+                    << iris::crypto::to_hex(actual) << ")");
     return std::nullopt;
 }
 

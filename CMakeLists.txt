@@ -12,6 +12,7 @@ message(STATUS "clang-tidy enabled: ${CLANG_TIDY}")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Common warnings
 add_compile_options(-Wall -Wextra -Wpedantic)
@@ -20,8 +21,10 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 add_library(iris_common STATIC
     src/common/socket.cpp
     src/common/protocol.cpp
+    src/common/sha256.cpp
 )
 target_include_directories(iris_common PUBLIC include include/common)
+target_link_libraries(iris_common PUBLIC OpenSSL::Crypto)
 
 # Server
 add_executable(iris_server
