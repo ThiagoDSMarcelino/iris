@@ -177,14 +177,13 @@ std::optional<ClientError> Client::fetch(const char *filename, const char *outpu
         received += *got;
         LOG("Received " << received << "/" << header->length << " bytes");
     }
+    auto actual = hasher.finalize();
 
     iris::crypto::Sha256Digest expected{};
     if (!this->socket->receive_all(expected.data(), expected.size()))
     {
         return cleanup(ClientError::ReceiveFailed);
     }
-
-    auto actual = hasher.finalize();
 
     PRINT("Expected checksum: " << iris::crypto::to_hex(expected));
     PRINT("Actual checksum:   " << iris::crypto::to_hex(actual));
